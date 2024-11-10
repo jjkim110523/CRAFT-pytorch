@@ -15,7 +15,8 @@ train:
   synth_ratio: 5
   real_dataset: custom
   ckpt_path: "./exp/craft_mlt_25k.pth"
-  eval_interval: 100
+  eval_interval: 20
+  save_interval: 20
   batch_size: 4
   st_iter: 0
   end_iter: 25000
@@ -88,8 +89,8 @@ train:
 test:
   trained_model : null
   custom_data:
-    test_set_size: -1
-    test_data_dir: "./data_root_dir/"
+    test_set_size: 1000
+    test_data_dir: "/home/jjkim110523/Projects/OCRData"
     text_threshold: 0.5
     low_text: 0.4
     link_threshold: 0.1
@@ -97,4 +98,4 @@ test:
     mag_ratio: 1.75
     poly: False
     cuda: True
-    vis_opt: True
+    vis_opt: False

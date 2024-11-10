@@ -171,6 +171,9 @@ class Trainer(object):
                     "{} iou F1-score".format(dataset): np.round(metrics["hmean"], 3),
                 }
             )
+            
+        return metrics
+
     def train(self, buffer_dict):
 
         torch.cuda.set_device(self.gpu)
@@ -271,6 +274,9 @@ class Trainer(object):
         print(
             "================================ Train start ================================"
         )
+        
+        best_hmean = 0.0  # 성능 개선을 추적하기 위한 변수
+                
         while train_step < whole_training_step:
             for index, (images, region_scores, affinity_scores, confidence_masks) in enumerate(trn_real_loader):
                 craft.train()
@@ -281,6 +287,7 @@ class Trainer(object):
                 affinity_scores = affinity_scores.cuda(non_blocking=True)
                 confidence_masks = confidence_masks.cuda(non_blocking=True)
 
+                # 학습률 조정
                 if train_step > 0 and train_step % self.config.train.lr_decay == 0:
                     update_lr_rate_step += 1
                     training_lr = self.adjust_learning_rate(
@@ -290,163 +297,113 @@ class Trainer(object):
                         self.config.train.lr,
                     )
 
-                if self.config.train.use_synthtext:
-                    # Synth image load
-                    syn_image, syn_region_label, syn_affi_label, syn_confidence_mask = next(
-                        batch_syn
-                    )
-                    syn_image = syn_image.cuda(non_blocking=True)
-                    syn_region_label = syn_region_label.cuda(non_blocking=True)
-                    syn_affi_label = syn_affi_label.cuda(non_blocking=True)
-                    syn_confidence_mask = syn_confidence_mask.cuda(non_blocking=True)
-
-                    # concat syn & custom image
-                    images = torch.cat((syn_image, images), 0)
-                    region_image_label = torch.cat(
-                        (syn_region_label, region_scores), 0
-                    )
-                    affinity_image_label = torch.cat((syn_affi_label, affinity_scores), 0)
-                    confidence_mask_label = torch.cat(
-                        (syn_confidence_mask, confidence_masks), 0
-                    )
-                else:
-                    region_image_label = region_scores
-                    affinity_image_label = affinity_scores
-                    confidence_mask_label = confidence_masks
-
+                # 학습 단계 (AMP 사용 여부에 따라 분기)
                 if self.config.train.amp:
                     with torch.cuda.amp.autocast():
-
                         output, _ = craft(images)
                         out1 = output[:, :, :, 0]
                         out2 = output[:, :, :, 1]
 
                         loss = criterion(
-                            region_image_label,
-                            affinity_image_label,
-                            out1,
-                            out2,
-                            confidence_mask_label,
-                            self.config.train.neg_rto,
-                            self.config.train.n_min_neg,
+                            region_scores, affinity_scores, out1, out2, confidence_masks,
+                            self.config.train.neg_rto, self.config.train.n_min_neg
                         )
 
                     optimizer.zero_grad()
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
-
                 else:
                     output, _ = craft(images)
                     out1 = output[:, :, :, 0]
                     out2 = output[:, :, :, 1]
                     loss = criterion(
-                        region_image_label,
-                        affinity_image_label,
-                        out1,
-                        out2,
-                        confidence_mask_label,
-                        self.config.train.neg_rto,
+                        region_scores, affinity_scores, out1, out2, confidence_masks,
+                        self.config.train.neg_rto
                     )
 
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
 
-                end_time = time.time()
+                # 주기적으로 손실 및 학습 정보 출력
                 loss_value += loss.item()
-                batch_time += end_time - start_time
+                batch_time += time.time() - start_time
 
                 if train_step > 0 and train_step % 5 == 0:
                     mean_loss = loss_value / 5
-                    loss_value = 0
                     avg_batch_time = batch_time / 5
+                    loss_value = 0
                     batch_time = 0
 
-                    print(
-                        "{}, training_step: {}|{}, learning rate: {:.8f}, "
-                        "training_loss: {:.5f}, avg_batch_time: {:.5f}".format(
-                            time.strftime(
-                                "%Y-%m-%d:%H:%M:%S", time.localtime(time.time())
-                            ),
-                            train_step,
-                            whole_training_step,
-                            training_lr,
-                            mean_loss,
-                            avg_batch_time,
-                        )
-                    )
+                    print(f"{time.strftime('%Y-%m-%d:%H:%M:%S')} - Step: {train_step}/{whole_training_step}, "
+                        f"LR: {training_lr:.8f}, Loss: {mean_loss:.5f}, Time: {avg_batch_time:.5f}s")
 
-                    if self.config.wandb_opt:
-                        wandb.log({"train_step": train_step, "mean_loss": mean_loss})
-
-                if (
-                        train_step % self.config.train.eval_interval == 0
-                        and train_step != 0
-                ):
-
+                # 검증 및 모델 저장
+                if train_step % self.config.train.eval_interval == 0 and train_step != 0:
                     craft.eval()
 
-                    print("Saving state, index:", train_step)
+                    # 검증을 수행하고 metrics를 받아옴
+                    metrics = self.iou_eval("custom_data", train_step, buffer_dict["custom_data"], craft)
+
+                    # 검증 결과가 있을 경우에만 모델 저장
+                    if metrics is not None:
+                        current_hmean = metrics.get("hmean", 0)
+                        print(f"Validation Results -> Precision: {metrics['precision']:.3f}, "
+                            f"Recall: {metrics['recall']:.3f}, Hmean: {current_hmean:.3f}")
+
+                        # 성능 개선 시 모델 저장
+                        if current_hmean > best_hmean:
+                            best_hmean = current_hmean
+                            save_param_dic = {
+                                "iter": train_step,
+                                "craft": craft.state_dict(),
+                                "optimizer": optimizer.state_dict(),
+                            }
+                            save_param_path = (
+                                f"{self.config.results_dir}/CRAFT_best_{train_step}_hmean_{current_hmean:.4f}.pth"
+                            )
+
+                            if self.config.train.amp:
+                                save_param_dic["scaler"] = scaler.state_dict()
+
+                            torch.save(save_param_dic, save_param_path)
+                            print(f"New best model saved at {save_param_path} with hmean: {current_hmean:.4f}")
+
+                # 주기적으로 체크포인트 저장
+                if train_step % self.config.train.save_interval == 0 and train_step != 0:
                     save_param_dic = {
                         "iter": train_step,
                         "craft": craft.state_dict(),
                         "optimizer": optimizer.state_dict(),
                     }
-                    save_param_path = (
-                            self.config.results_dir
-                            + "/CRAFT_mlt_"
-                            + repr(train_step)
-                            + ".pth"
-                    )
+                    save_param_path = f"{self.config.results_dir}/CRAFT_checkpoint_{train_step}.pth"
 
                     if self.config.train.amp:
                         save_param_dic["scaler"] = scaler.state_dict()
-                        save_param_path = (
-                                self.config.results_dir
-                                + "/CRAFT_mlt_amp_"
-                                + repr(train_step)
-                                + ".pth"
-                        )
-                    
-                    torch.save(save_param_dic, save_param_path)
 
-                    # validation
-                    self.iou_eval(
-                        "custom_data",
-                        train_step,
-                        buffer_dict["custom_data"],
-                        craft,
-                    )
+                    torch.save(save_param_dic, save_param_path)
+                    print(f"Checkpoint saved at {save_param_path}")
 
                 train_step += 1
                 if train_step >= whole_training_step:
                     break
 
-            if self.config.mode == "weak_supervision":
-                state_dict = craft.module.state_dict()
-                supervision_model.load_state_dict(state_dict)
-                trn_real_dataset.update_model(supervision_model)
 
-        # save last model
+        # 훈련 종료 후 마지막 모델 저장
         save_param_dic = {
             "iter": train_step,
             "craft": craft.state_dict(),
             "optimizer": optimizer.state_dict(),
         }
-        save_param_path = (
-                self.config.results_dir + "/CRAFT_mlt_" + repr(train_step) + ".pth"
-        )
+        save_param_path = f"{self.config.results_dir}/CRAFT_last_{train_step}_hmean_{best_hmean:.4f}.pth"
 
         if self.config.train.amp:
             save_param_dic["scaler"] = scaler.state_dict()
-            save_param_path = (
-                    self.config.results_dir
-                    + "/CRAFT_mlt_amp_"
-                    + repr(train_step)
-                    + ".pth"
-            )
+
         torch.save(save_param_dic, save_param_path)
+        print(f"Training complete. Final model saved at {save_param_path}")
+
 
 
 def main():
