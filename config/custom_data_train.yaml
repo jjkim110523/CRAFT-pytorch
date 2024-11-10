@@ -3,7 +3,7 @@ wandb_opt: False
 results_dir: "./exp/"
 vis_test_dir: "./vis_result/"
 
-data_root_dir: "./data_root_dir/"
+data_root_dir: "/home/jjkim110523/Projects/OCRData"
 score_gt_dir: None # "/data/ICDAR2015_official_supervision"
 mode: "weak_supervision"
 
@@ -15,8 +15,8 @@ train:
   synth_ratio: 5
   real_dataset: custom
   ckpt_path: "./exp/craft_mlt_25k.pth"
-  eval_interval: 1
-  batch_size: 1
+  eval_interval: 100
+  batch_size: 4
   st_iter: 0
   end_iter: 25000
   lr: 0.0001
@@ -35,8 +35,8 @@ train:
     do_not_care_label: ['###', '']
     mean: [0.485, 0.456, 0.406]
     variance: [0.229, 0.224, 0.225]
-    enlarge_region : [0.5, 0.5] # x axis, y axis
-    enlarge_affinity: [0.5, 0.5]
+    enlarge_region : [0.8, 0.8] # x axis, y axis
+    enlarge_affinity: [0.8, 0.8]
     gauss_init_size: 200
     gauss_sigma: 40
     watershed:
@@ -88,11 +88,11 @@ train:
 test:
   trained_model : null
   custom_data:
-    test_set_size: 1
+    test_set_size: -1
     test_data_dir: "./data_root_dir/"
-    text_threshold: 0.75
-    low_text: 0.5
-    link_threshold: 0.2
+    text_threshold: 0.5
+    low_text: 0.4
+    link_threshold: 0.1
     canvas_size: 2240
     mag_ratio: 1.75
     poly: False
