@@ -296,6 +296,29 @@ class Trainer(object):
                         update_lr_rate_step,
                         self.config.train.lr,
                     )
+                
+                if self.config.train.use_synthtext:
+                    # Synth image load
+                    syn_image, syn_region_label, syn_affi_label, syn_confidence_mask = next(
+                        batch_syn
+                    )
+                    syn_image = syn_image.cuda(non_blocking=True)
+                    syn_region_label = syn_region_label.cuda(non_blocking=True)
+                    syn_affi_label = syn_affi_label.cuda(non_blocking=True)
+                    syn_confidence_mask = syn_confidence_mask.cuda(non_blocking=True)
+                    # concat syn & custom image
+                    images = torch.cat((syn_image, images), 0)
+                    region_image_label = torch.cat(
+                        (syn_region_label, region_scores), 0
+                    )
+                    affinity_image_label = torch.cat((syn_affi_label, affinity_scores), 0)
+                    confidence_mask_label = torch.cat(
+                        (syn_confidence_mask, confidence_masks), 0
+                    )
+                else:
+                    region_image_label = region_scores
+                    affinity_image_label = affinity_scores
+                    confidence_mask_label = confidence_masks
 
                 # 학습 단계 (AMP 사용 여부에 따라 분기)
                 if self.config.train.amp:
